@@ -4,6 +4,7 @@ from PyQt5.QtWidgets import (
     QDockWidget, QLabel, QLineEdit, QPushButton,
     QSlider, QComboBox, QGroupBox, QDoubleSpinBox,
     QSpinBox, QCheckBox, QSizePolicy, QFrame,
+    QPlainTextEdit, QFileDialog,
     QStatusBar, QAction, QMenu, QMenuBar,
 )
 from PyQt5.QtCore import Qt, QTimer
@@ -84,18 +85,25 @@ class MainWindow(QMainWindow):
     # ── UI construction ─────────────────────────────────────────────────────
 
     def _build_ui(self):
-        # Central display
+        # Central display with dedicated bottom TX/RX bar
         self._display = SpectrumWaterfallWidget(
             sample_rate=self._sdr.sample_rate,
             center_freq=self._sdr.center_freq,
         )
-        self.setCentralWidget(self._display)
+
+        central = QWidget()
+        central_layout = QVBoxLayout(central)
+        central_layout.setContentsMargins(0, 0, 0, 0)
+        central_layout.setSpacing(0)
+        central_layout.addWidget(self._display)
+        central_layout.addWidget(self._build_bottom_bar())
+        self.setCentralWidget(central)
 
         # Controls dock
         dock = QDockWidget("Controls", self)
         dock.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable)
-        dock.setMinimumWidth(220)
-        dock.setMaximumWidth(280)
+        dock.setMinimumWidth(320)
+        dock.setMaximumWidth(420)
         dock.setWidget(self._build_controls())
         self.addDockWidget(Qt.RightDockWidgetArea, dock)
 
@@ -287,6 +295,36 @@ class MainWindow(QMainWindow):
         vbox.addStretch()
         return container
 
+    def _build_bottom_bar(self) -> QWidget:
+        container = QWidget()
+        layout = QHBoxLayout(container)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(8)
+
+        tx_grp = _group("TX Text")
+        tx_layout = QVBoxLayout(tx_grp)
+        self._tx_edit = QPlainTextEdit()
+        self._tx_edit.setPlaceholderText("Enter text to send (max 1024 bytes)")
+        tx_layout.addWidget(self._tx_edit)
+
+        tx_row = QHBoxLayout()
+        self._send_btn = QPushButton("Send")
+        self._send_file_btn = QPushButton("Send file...")
+        tx_row.addWidget(self._send_btn)
+        tx_row.addWidget(self._send_file_btn)
+        tx_layout.addLayout(tx_row)
+        layout.addWidget(tx_grp, 1)
+
+        rx_grp = _group("RX Text")
+        rx_layout = QVBoxLayout(rx_grp)
+        self._rx_display = QPlainTextEdit()
+        self._rx_display.setReadOnly(True)
+        self._rx_display.setPlaceholderText("Received messages appear here")
+        rx_layout.addWidget(self._rx_display)
+        layout.addWidget(rx_grp, 1)
+
+        return container
+
     def _build_menu(self):
         mb = self.menuBar()
 
@@ -317,6 +355,7 @@ class MainWindow(QMainWindow):
         # SDR worker → display
         self._sdr.fft_ready.connect(self._on_fft)
         self._sdr.audio_ready.connect(self._audio.enqueue)
+        self._sdr.decoded_data.connect(self._on_decoded_data)
         self._sdr.status_msg.connect(self._on_status)
         self._sdr.error_msg.connect(self._on_error)
 
@@ -342,6 +381,9 @@ class MainWindow(QMainWindow):
         self._sql_spin.valueChanged.connect(
             lambda v: self._audio.set_squelch(float(v)))
         self._mute_btn.toggled.connect(self._audio.set_muted)
+
+        self._send_btn.clicked.connect(self._on_send_clicked)
+        self._send_file_btn.clicked.connect(self._on_send_file_clicked)
 
     # ── slot handlers ────────────────────────────────────────────────────────
 
@@ -445,6 +487,35 @@ class MainWindow(QMainWindow):
 
     def _on_error(self, msg: str):
         self._sb.showMessage(f"Error: {msg}", 3000)
+
+    def _on_send_clicked(self):
+        text = self._tx_edit.toPlainText().strip()
+        if not text:
+            self._on_status("Enter text before sending")
+            return
+        try:
+            self._sdr.send_text(text)
+        except Exception as exc:
+            self._on_error(str(exc))
+
+    def _on_send_file_clicked(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Select file to send")
+        if not path:
+            return
+        try:
+            with open(path, 'rb') as f:
+                data = f.read()
+            self._sdr.send_data(data)
+        except Exception as exc:
+            self._on_error(str(exc))
+
+    def _on_decoded_data(self, data: bytes):
+        try:
+            text = data.decode('utf-8')
+        except Exception:
+            text = data.hex()
+        self._rx_display.appendPlainText(text)
+        self._on_status(f"Received {len(data)} bytes")
 
     def _refresh_status(self):
         mode_str = "SIM" if self._sdr.simulation_mode else "HW"

@@ -14,19 +14,23 @@ except ImportError:
 class SDRWorker(QThread):
     """Acquisition + DSP thread. Emits FFT data and demodulated audio."""
 
-    fft_ready   = pyqtSignal(np.ndarray, np.ndarray)  # (freqs_hz, power_db)
-    audio_ready = pyqtSignal(np.ndarray)               # float32 audio chunk
-    status_msg  = pyqtSignal(str)
-    error_msg   = pyqtSignal(str)
-    connected   = pyqtSignal(bool)
+    fft_ready    = pyqtSignal(np.ndarray, np.ndarray)  # (freqs_hz, power_db)
+    audio_ready  = pyqtSignal(np.ndarray)               # float32 audio chunk
+    decoded_data = pyqtSignal(bytes)
+    status_msg   = pyqtSignal(str)
+    error_msg    = pyqtSignal(str)
+    connected    = pyqtSignal(bool)
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._sdr     = None
-        self._running = False
-        self._sim     = not _PLUTO_OK
-        self._mutex   = QMutex()
-        self._pending = {}
+        self._sdr      = None
+        self._running  = False
+        self._sim      = not _PLUTO_OK
+        self._mutex    = QMutex()
+        self._pending  = {}
+        self._tx_waveform = np.zeros(0, dtype=np.complex64)
+        self._tx_pos      = 0
+        self._afsk_decoder = dsp_utils.AFSKDecoder(dsp_utils.AUDIO_RATE)
 
         # SDR parameters
         self.sample_rate  = int(2e6)
@@ -124,6 +128,9 @@ class SDRWorker(QThread):
                         self.demod_mode,
                     )
                     if len(audio):
+                        decoded = self._afsk_decoder.feed(audio)
+                        for packet in decoded:
+                            self.decoded_data.emit(packet)
                         self.audio_ready.emit(audio)
             except Exception as exc:
                 self.error_msg.emit(str(exc))
@@ -161,6 +168,20 @@ class SDRWorker(QThread):
             elif k == 'rx_offset':  self.rx_offset  = v
             elif k == 'channel_bw': self.channel_bw = v
 
+    def send_text(self, text: str):
+        self.send_data(text.encode('utf-8'))
+
+    def send_data(self, payload: bytes):
+        if len(payload) > dsp_utils.AFSK_MAX_PAYLOAD:
+            raise ValueError(f"Message too large: {len(payload)} bytes (max {dsp_utils.AFSK_MAX_PAYLOAD})")
+        if not self._sim:
+            self.status_msg.emit("TX is currently supported only in simulation mode")
+            return
+        audio = dsp_utils.encode_afsk_bytes(payload, dsp_utils.AUDIO_RATE)
+        self._tx_waveform = dsp_utils.afsk_audio_to_fm(audio, self.sample_rate)
+        self._tx_pos = 0
+        self.status_msg.emit(f"Queued {len(payload)}-byte message for transmission")
+
     def _acquire(self) -> np.ndarray:
         if self._sim:
             return self._simulate()
@@ -169,6 +190,17 @@ class SDRWorker(QThread):
 
     def _simulate(self) -> np.ndarray:
         n  = self.buffer_size
+        if self._tx_pos < len(self._tx_waveform):
+            end = min(self._tx_pos + n, len(self._tx_waveform))
+            sig = self._tx_waveform[self._tx_pos:end]
+            self._tx_pos = end
+            if self._tx_pos >= len(self._tx_waveform):
+                self._tx_waveform = np.zeros(0, dtype=np.complex64)
+                self.status_msg.emit("Message transmission finished")
+            if len(sig) < n:
+                remainder = self._simulate() if self._tx_pos >= len(self._tx_waveform) else np.zeros(n - len(sig), dtype=np.complex64)
+                return np.concatenate((sig, remainder))
+            return sig
         sr = self.sample_rate
         t  = np.arange(n, dtype=np.float64) / sr + self._sim_t
         self._sim_t += n / sr

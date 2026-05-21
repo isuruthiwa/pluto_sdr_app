@@ -4,6 +4,10 @@ from fractions import Fraction
 
 FFT_SIZE = 2048
 AUDIO_RATE = 48000
+AFSK_MARK_HZ = 1200.0
+AFSK_SPACE_HZ = 2200.0
+AFSK_BAUD = 50.0
+AFSK_MAX_PAYLOAD = 1024
 
 
 def compute_fft(samples: np.ndarray, sample_rate: float,
@@ -27,6 +31,123 @@ def compute_fft(samples: np.ndarray, sample_rate: float,
     power_db = 10.0 * np.log10(np.maximum(power, 1e-14))
     freqs = np.fft.fftshift(np.fft.fftfreq(fft_size, 1.0 / sample_rate))
     return freqs, power_db.astype(np.float32)
+
+
+def _tone(freq: float, num_samples: int, sample_rate: float) -> np.ndarray:
+    t = np.arange(num_samples, dtype=np.float32) / sample_rate
+    return np.sin(2.0 * np.pi * freq * t).astype(np.float32)
+
+
+def _afsk_samples(bits: list[int], sample_rate: float) -> np.ndarray:
+    samples_per_bit = int(round(sample_rate / AFSK_BAUD))
+    mark = _tone(AFSK_MARK_HZ, samples_per_bit, sample_rate)
+    space = _tone(AFSK_SPACE_HZ, samples_per_bit, sample_rate)
+    audio = np.empty(samples_per_bit * len(bits), dtype=np.float32)
+    for idx, bit in enumerate(bits):
+        start = idx * samples_per_bit
+        audio[start:start + samples_per_bit] = mark if bit else space
+    return audio * 0.8
+
+
+def encode_afsk_bytes(payload: bytes, sample_rate: float = AUDIO_RATE) -> np.ndarray:
+    if len(payload) > AFSK_MAX_PAYLOAD:
+        raise ValueError(f"Payload too large (max {AFSK_MAX_PAYLOAD} bytes)")
+    framed = len(payload).to_bytes(2, 'little') + payload
+    bits: list[int] = [1] * 16
+    for byte in framed:
+        bits.append(0)
+        for bit_index in range(8):
+            bits.append((byte >> bit_index) & 1)
+        bits.append(1)
+    return _afsk_samples(bits, sample_rate)
+
+
+def _goertzel(samples: np.ndarray, sample_rate: float, freq: float) -> float:
+    n = len(samples)
+    k = int(0.5 + (n * freq) / sample_rate)
+    omega = (2.0 * np.pi * k) / n
+    cosine = np.cos(omega)
+    coeff = 2.0 * cosine
+    q0 = 0.0
+    q1 = 0.0
+    q2 = 0.0
+    for sample in samples:
+        q0 = coeff * q1 - q2 + sample
+        q2 = q1
+        q1 = q0
+    return q1 * q1 + q2 * q2 - coeff * q1 * q2
+
+
+def afsk_audio_to_fm(audio: np.ndarray, sample_rate: float = AUDIO_RATE,
+                     deviation: float = 2500.0) -> np.ndarray:
+    audio = audio.astype(np.float64)
+    phase = 2.0 * np.pi * deviation * np.cumsum(audio) / sample_rate
+    return np.exp(1j * phase).astype(np.complex64)
+
+
+class AFSKDecoder:
+    def __init__(self, sample_rate: float = AUDIO_RATE, baud: float = AFSK_BAUD):
+        self.sample_rate = sample_rate
+        self.baud = baud
+        self.samples_per_bit = int(round(self.sample_rate / self.baud))
+        self._buffer = np.zeros(0, dtype=np.float32)
+        self._state = 'search'
+        self._current_byte = 0
+        self._bit_index = 0
+        self._length = None
+        self._length_bytes = bytearray()
+        self._received = bytearray()
+        self._previous_bit = 1
+
+    def _decode_bit(self, samples: np.ndarray) -> int:
+        samples = samples * np.hanning(len(samples))
+        mark_energy = _goertzel(samples, self.sample_rate, AFSK_MARK_HZ)
+        space_energy = _goertzel(samples, self.sample_rate, AFSK_SPACE_HZ)
+        return 1 if mark_energy > space_energy else 0
+
+    def feed(self, samples: np.ndarray) -> list[bytes]:
+        self._buffer = np.concatenate((self._buffer, samples.astype(np.float32)))
+        messages: list[bytes] = []
+
+        while len(self._buffer) >= self.samples_per_bit:
+            bit_window = self._buffer[:self.samples_per_bit]
+            self._buffer = self._buffer[self.samples_per_bit:]
+            bit = self._decode_bit(bit_window)
+
+            if self._state == 'search':
+                if self._previous_bit == 1 and bit == 0:
+                    self._state = 'byte'
+                    self._current_byte = 0
+                    self._bit_index = 0
+                self._previous_bit = bit
+                continue
+
+            if self._state == 'byte':
+                if self._bit_index < 8:
+                    self._current_byte |= (bit << self._bit_index)
+                    self._bit_index += 1
+                    continue
+
+                if bit == 1:
+                    if self._length is None:
+                        self._length_bytes.append(self._current_byte)
+                        if len(self._length_bytes) == 2:
+                            self._length = int.from_bytes(self._length_bytes, 'little')
+                            self._received = bytearray()
+                            if self._length == 0:
+                                messages.append(bytes(self._received))
+                                self._length = None
+                                self._length_bytes.clear()
+                    else:
+                        self._received.append(self._current_byte)
+                        if len(self._received) >= self._length:
+                            messages.append(bytes(self._received))
+                            self._length = None
+                            self._length_bytes.clear()
+                self._state = 'search'
+                self._previous_bit = bit
+
+        return messages
 
 
 def _lpf_taps(cutoff_hz: float, sample_rate: float, num_taps: int = 127) -> np.ndarray:

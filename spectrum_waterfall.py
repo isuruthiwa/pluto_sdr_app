@@ -4,7 +4,7 @@ from PyQt5.QtCore import pyqtSignal, Qt
 from PyQt5.QtWidgets import QWidget, QVBoxLayout
 from PyQt5.QtGui import QFont, QTransform
 
-WATERFALL_ROWS = 200
+WATERFALL_ROWS = 120
 
 
 def _make_colormap() -> pg.ColorMap:
@@ -119,9 +119,9 @@ class SpectrumWaterfallWidget(QWidget):
         )
         self._wf.addItem(self._wf_rx_line)
 
-        # Size ratio: spectrum 1 part, waterfall 2 parts
+        # Size ratio: spectrum 1 part, waterfall 1 part
         self._glw.ci.layout.setRowStretchFactor(0, 1)
-        self._glw.ci.layout.setRowStretchFactor(1, 2)
+        self._glw.ci.layout.setRowStretchFactor(1, 1)
 
         # Mouse clicks
         self._sp.scene().sigMouseClicked.connect(self._on_click)
