@@ -1,7 +1,7 @@
 import numpy as np
 from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QDockWidget, QLabel, QLineEdit, QPushButton,
+    QDialog, QTabWidget, QToolBar, QLabel, QLineEdit, QPushButton,
     QSlider, QComboBox, QGroupBox, QDoubleSpinBox,
     QSpinBox, QCheckBox, QSizePolicy, QFrame,
     QPlainTextEdit, QFileDialog,
@@ -13,9 +13,13 @@ from PyQt5.QtGui import QFont, QIcon
 from spectrum_waterfall import SpectrumWaterfallWidget
 from sdr_worker import SDRWorker
 from audio_worker import AudioWorker
+from mic_input_worker import MicInputWorker
 
 # Supported demodulation modes
 DEMOD_MODES = ['nfm', 'wfm', 'am', 'usb', 'lsb']
+
+# TX modulation modes
+TX_MODES = ['nbfm', 'wfm', 'am']
 
 # Preset bandwidths per mode (Hz)
 BW_PRESETS = {
@@ -37,13 +41,13 @@ SAMPLE_RATES = [
 
 def _group(title: str) -> QGroupBox:
     g = QGroupBox(title)
-    g.setFont(QFont('Segoe UI', 8, QFont.Bold))
+    g.setFont(QFont('Arial', 10, QFont.Bold))
     return g
 
 
 def _label(text: str) -> QLabel:
     lbl = QLabel(text)
-    lbl.setFont(QFont('Segoe UI', 8))
+    lbl.setFont(QFont('Arial', 10))
     return lbl
 
 
@@ -64,10 +68,13 @@ class MainWindow(QMainWindow):
         # Workers
         self._sdr   = SDRWorker()
         self._audio = AudioWorker()
+        self._mic   = MicInputWorker()
 
         self._center_freq = self._sdr.center_freq
         self._rx_offset   = 0.0
         self._demod_mode  = 'nfm'
+        self._tx_mode     = 'nbfm'
+        self._tx_rf_offset = 0.0
 
         self._build_ui()
         self._connect_signals()
@@ -81,6 +88,10 @@ class MainWindow(QMainWindow):
         self._sdr.try_connect()
         self._sdr.start()
         self._audio.start()
+        self._mic.start()
+
+        # Show settings dialog so controls are immediately visible
+        QTimer.singleShot(0, self._show_settings_dialog)
 
     # ── UI construction ─────────────────────────────────────────────────────
 
@@ -99,13 +110,17 @@ class MainWindow(QMainWindow):
         central_layout.addWidget(self._build_bottom_bar())
         self.setCentralWidget(central)
 
-        # Controls dock
-        dock = QDockWidget("Controls", self)
-        dock.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable)
-        dock.setMinimumWidth(320)
-        dock.setMaximumWidth(420)
-        dock.setWidget(self._build_controls())
-        self.addDockWidget(Qt.RightDockWidgetArea, dock)
+        # Settings dialog — tabbed, non-modal popup
+        self._settings_dialog = QDialog(self)
+        self._settings_dialog.setWindowTitle("Settings")
+        dlg_layout = QVBoxLayout(self._settings_dialog)
+        dlg_layout.setContentsMargins(0, 4, 0, 0)
+        dlg_layout.addWidget(self._build_controls())
+        self._settings_dialog.setModal(False)
+        self._settings_dialog.resize(360, 460)
+
+        # Toolbar
+        self._build_toolbar()
 
         # Menu bar
         self._build_menu()
@@ -119,73 +134,74 @@ class MainWindow(QMainWindow):
         self._sb.addPermanentWidget(self._sb_right)
 
     def _build_controls(self) -> QWidget:
-        container = QWidget()
-        vbox = QVBoxLayout(container)
-        vbox.setSpacing(6)
-        vbox.setContentsMargins(6, 6, 6, 6)
+        tabs = QTabWidget()
+        tabs.setDocumentMode(True)
+        tabs.addTab(self._build_radio_tab(),   "Radio")
+        tabs.addTab(self._build_tx_tab(),      "TX")
+        tabs.addTab(self._build_audio_tab(),   "Audio")
+        tabs.addTab(self._build_display_tab(), "Display")
+        return tabs
 
-        # ── Connection ───────────────────────────────────────────────────────
+    def _build_radio_tab(self) -> QWidget:
+        w = QWidget()
+        vbox = QVBoxLayout(w)
+        vbox.setSpacing(8)
+        vbox.setContentsMargins(8, 8, 8, 8)
+
+        # Connection
         grp = _group("Connection")
         gl = QVBoxLayout(grp)
-
         row = QHBoxLayout()
         row.addWidget(_label("URI:"))
         self._uri_edit = QLineEdit("ip:192.168.2.1")
-        self._uri_edit.setFont(QFont('Consolas', 8))
+        self._uri_edit.setFont(QFont('Menlo', 10))
         row.addWidget(self._uri_edit)
         gl.addLayout(row)
-
         self._conn_btn = QPushButton("Connect")
         self._conn_btn.setCheckable(True)
         gl.addWidget(self._conn_btn)
-
         self._sim_label = QLabel("● Simulation mode")
-        self._sim_label.setStyleSheet("color:#f90; font-size:8pt;")
+        self._sim_label.setStyleSheet("color:#b85c00; font-size:10pt;")
         gl.addWidget(self._sim_label)
         vbox.addWidget(grp)
 
-        # ── Center Frequency ─────────────────────────────────────────────────
+        # Center Frequency
         grp = _group("Center Frequency")
         gl = QVBoxLayout(grp)
-
-        row = QHBoxLayout()
         self._freq_spin = QDoubleSpinBox()
         self._freq_spin.setRange(70.0, 6000.0)
         self._freq_spin.setDecimals(4)
         self._freq_spin.setSuffix(" MHz")
         self._freq_spin.setValue(self._center_freq / 1e6)
         self._freq_spin.setSingleStep(0.1)
-        self._freq_spin.setFont(QFont('Consolas', 10, QFont.Bold))
-        self._freq_spin.setMinimumHeight(28)
-        row.addWidget(self._freq_spin)
-        gl.addLayout(row)
-
-        row2 = QHBoxLayout()
-        for label, delta in [("−1M", -1e6), ("−100k", -100e3),
-                              ("+100k", 100e3), ("+1M", 1e6)]:
-            btn = QPushButton(label)
-            btn.setFixedHeight(22)
+        self._freq_spin.setFont(QFont('Menlo', 13, QFont.Bold))
+        self._freq_spin.setMinimumHeight(30)
+        gl.addWidget(self._freq_spin)
+        step_row = QHBoxLayout()
+        for lbl, delta in [("−1M", -1e6), ("−100k", -100e3), ("+100k", 100e3), ("+1M", 1e6)]:
+            btn = QPushButton(lbl)
+            btn.setFixedHeight(24)
             btn.clicked.connect(lambda _, d=delta: self._step_center_freq(d))
-            row2.addWidget(btn)
-        gl.addLayout(row2)
+            step_row.addWidget(btn)
+        gl.addLayout(step_row)
         vbox.addWidget(grp)
 
-        # ── Sample Rate ──────────────────────────────────────────────────────
-        grp = _group("Sample Rate")
-        gl = QVBoxLayout(grp)
+        # Sample Rate + Receive Channel side by side
+        row = QHBoxLayout()
+
+        grp_sr = _group("Sample Rate")
+        gl_sr = QVBoxLayout(grp_sr)
         self._sr_combo = QComboBox()
         for label, _ in SAMPLE_RATES:
             self._sr_combo.addItem(label)
-        self._sr_combo.setCurrentIndex(2)   # 2 MHz default
-        gl.addWidget(self._sr_combo)
-        vbox.addWidget(grp)
+        self._sr_combo.setCurrentIndex(2)
+        gl_sr.addWidget(self._sr_combo)
+        row.addWidget(grp_sr)
 
-        # ── Receive Channel ──────────────────────────────────────────────────
-        grp = _group("Receive Channel")
-        gl = QVBoxLayout(grp)
-
-        row = QHBoxLayout()
-        row.addWidget(_label("Offset:"))
+        grp_ch = _group("RX Channel")
+        gl_ch = QVBoxLayout(grp_ch)
+        off_row = QHBoxLayout()
+        off_row.addWidget(_label("Offset:"))
         self._offset_spin = QDoubleSpinBox()
         self._offset_spin.setRange(-self._sdr.sample_rate / 2 / 1e3,
                                     self._sdr.sample_rate / 2 / 1e3)
@@ -193,99 +209,136 @@ class MainWindow(QMainWindow):
         self._offset_spin.setSuffix(" kHz")
         self._offset_spin.setValue(0.0)
         self._offset_spin.setSingleStep(1.0)
-        row.addWidget(self._offset_spin)
-        gl.addLayout(row)
-
-        row2 = QHBoxLayout()
-        row2.addWidget(_label("Mode:"))
+        off_row.addWidget(self._offset_spin)
+        gl_ch.addLayout(off_row)
         self._mode_combo = QComboBox()
         for m in DEMOD_MODES:
             self._mode_combo.addItem(m.upper())
-        gl.addLayout(row2)
-        gl.addWidget(self._mode_combo)
-
-        row3 = QHBoxLayout()
-        row3.addWidget(_label("BW:"))
+        gl_ch.addWidget(self._mode_combo)
+        bw_row = QHBoxLayout()
+        bw_row.addWidget(_label("BW:"))
         self._bw_spin = QDoubleSpinBox()
         self._bw_spin.setRange(1.0, 500.0)
         self._bw_spin.setDecimals(1)
         self._bw_spin.setSuffix(" kHz")
         self._bw_spin.setValue(BW_PRESETS['nfm'] / 1e3)
         self._bw_spin.setSingleStep(1.0)
-        row3.addWidget(self._bw_spin)
-        gl.addLayout(row3)
-        vbox.addWidget(grp)
+        bw_row.addWidget(self._bw_spin)
+        gl_ch.addLayout(bw_row)
+        row.addWidget(grp_ch)
 
-        # ── Gain ─────────────────────────────────────────────────────────────
+        vbox.addLayout(row)
+
+        # Gain
         grp = _group("Gain")
         gl = QVBoxLayout(grp)
-
         self._agc_check = QCheckBox("AGC (slow attack)")
         gl.addWidget(self._agc_check)
-
-        row = QHBoxLayout()
-        row.addWidget(_label("Gain:"))
+        gain_row = QHBoxLayout()
+        gain_row.addWidget(_label("Gain:"))
         self._gain_spin = QDoubleSpinBox()
         self._gain_spin.setRange(0.0, 74.5)
         self._gain_spin.setDecimals(1)
         self._gain_spin.setSuffix(" dB")
         self._gain_spin.setValue(self._sdr.gain)
         self._gain_spin.setSingleStep(1.0)
-        row.addWidget(self._gain_spin)
-        gl.addLayout(row)
-
+        gain_row.addWidget(self._gain_spin)
+        gl.addLayout(gain_row)
         self._gain_slider = QSlider(Qt.Horizontal)
         self._gain_slider.setRange(0, 745)
         self._gain_slider.setValue(int(self._sdr.gain * 10))
         gl.addWidget(self._gain_slider)
         vbox.addWidget(grp)
 
-        # ── Display ───────────────────────────────────────────────────────────
-        grp = _group("Display")
+        vbox.addStretch()
+        return w
+
+    def _build_tx_tab(self) -> QWidget:
+        w = QWidget()
+        vbox = QVBoxLayout(w)
+        vbox.setSpacing(8)
+        vbox.setContentsMargins(8, 8, 8, 8)
+
+        grp = _group("TX Streaming (Mic)")
         gl = QVBoxLayout(grp)
 
-        row = QHBoxLayout()
-        row.addWidget(_label("Min dB:"))
-        self._min_db = QSpinBox()
-        self._min_db.setRange(-140, -20)
-        self._min_db.setValue(-110)
-        self._min_db.setSuffix(" dB")
-        row.addWidget(self._min_db)
-        gl.addLayout(row)
+        mode_row = QHBoxLayout()
+        mode_row.addWidget(_label("Modulation:"))
+        self._tx_mode_combo = QComboBox()
+        for m in TX_MODES:
+            self._tx_mode_combo.addItem(m.upper())
+        self._tx_mode_combo.setCurrentIndex(0)
+        mode_row.addWidget(self._tx_mode_combo)
+        gl.addLayout(mode_row)
 
-        row2 = QHBoxLayout()
-        row2.addWidget(_label("Max dB:"))
-        self._max_db = QSpinBox()
-        self._max_db.setRange(-100, 0)
-        self._max_db.setValue(-10)
-        self._max_db.setSuffix(" dB")
-        row2.addWidget(self._max_db)
-        gl.addLayout(row2)
+        off_row = QHBoxLayout()
+        off_row.addWidget(_label("RF Offset:"))
+        self._tx_offset_spin = QDoubleSpinBox()
+        self._tx_offset_spin.setRange(-500.0, 500.0)
+        self._tx_offset_spin.setDecimals(1)
+        self._tx_offset_spin.setSuffix(" kHz")
+        self._tx_offset_spin.setValue(0.0)
+        self._tx_offset_spin.setSingleStep(1.0)
+        off_row.addWidget(self._tx_offset_spin)
+        gl.addLayout(off_row)
+
+        gain_row = QHBoxLayout()
+        gain_row.addWidget(_label("TX Gain:"))
+        self._tx_gain_spin = QDoubleSpinBox()
+        self._tx_gain_spin.setRange(0.1, 1.0)
+        self._tx_gain_spin.setDecimals(2)
+        self._tx_gain_spin.setValue(0.8)
+        self._tx_gain_spin.setSingleStep(0.05)
+        gain_row.addWidget(self._tx_gain_spin)
+        gl.addLayout(gain_row)
+
+        mic_row = QHBoxLayout()
+        mic_row.addWidget(_label("Mic Level:"))
+        self._mic_level_label = QLabel("−∞ dB")
+        self._mic_level_label.setFont(QFont('Menlo', 11))
+        mic_row.addWidget(self._mic_level_label)
+        gl.addLayout(mic_row)
+
+        self._tx_stream_btn = QPushButton("Start TX Stream")
+        self._tx_stream_btn.setCheckable(True)
+        self._tx_stream_btn.setMinimumHeight(32)
+        self._tx_stream_btn.setStyleSheet(
+            "QPushButton:checked { background-color: #c41e3a; color: white; font-weight: bold; }"
+        )
+        gl.addWidget(self._tx_stream_btn)
         vbox.addWidget(grp)
 
-        # ── Audio ─────────────────────────────────────────────────────────────
-        grp = _group("Audio")
+        vbox.addStretch()
+        return w
+
+    def _build_audio_tab(self) -> QWidget:
+        w = QWidget()
+        vbox = QVBoxLayout(w)
+        vbox.setSpacing(8)
+        vbox.setContentsMargins(8, 8, 8, 8)
+
+        grp = _group("Audio Output")
         gl = QVBoxLayout(grp)
 
-        row = QHBoxLayout()
-        row.addWidget(_label("Vol:"))
+        vol_row = QHBoxLayout()
+        vol_row.addWidget(_label("Volume:"))
         self._vol_slider = QSlider(Qt.Horizontal)
         self._vol_slider.setRange(0, 100)
         self._vol_slider.setValue(80)
-        row.addWidget(self._vol_slider)
+        vol_row.addWidget(self._vol_slider)
         self._vol_label = QLabel("80%")
-        self._vol_label.setFixedWidth(32)
-        row.addWidget(self._vol_label)
-        gl.addLayout(row)
+        self._vol_label.setFixedWidth(36)
+        vol_row.addWidget(self._vol_label)
+        gl.addLayout(vol_row)
 
-        row2 = QHBoxLayout()
-        row2.addWidget(_label("SQL:"))
+        sql_row = QHBoxLayout()
+        sql_row.addWidget(_label("Squelch:"))
         self._sql_spin = QSpinBox()
         self._sql_spin.setRange(-120, 0)
         self._sql_spin.setValue(-60)
         self._sql_spin.setSuffix(" dB")
-        row2.addWidget(self._sql_spin)
-        gl.addLayout(row2)
+        sql_row.addWidget(self._sql_spin)
+        gl.addLayout(sql_row)
 
         self._mute_btn = QPushButton("Mute")
         self._mute_btn.setCheckable(True)
@@ -293,7 +346,38 @@ class MainWindow(QMainWindow):
         vbox.addWidget(grp)
 
         vbox.addStretch()
-        return container
+        return w
+
+    def _build_display_tab(self) -> QWidget:
+        w = QWidget()
+        vbox = QVBoxLayout(w)
+        vbox.setSpacing(8)
+        vbox.setContentsMargins(8, 8, 8, 8)
+
+        grp = _group("Power Range")
+        gl = QVBoxLayout(grp)
+
+        min_row = QHBoxLayout()
+        min_row.addWidget(_label("Min dB:"))
+        self._min_db = QSpinBox()
+        self._min_db.setRange(-140, -20)
+        self._min_db.setValue(-110)
+        self._min_db.setSuffix(" dB")
+        min_row.addWidget(self._min_db)
+        gl.addLayout(min_row)
+
+        max_row = QHBoxLayout()
+        max_row.addWidget(_label("Max dB:"))
+        self._max_db = QSpinBox()
+        self._max_db.setRange(-100, 0)
+        self._max_db.setValue(-10)
+        self._max_db.setSuffix(" dB")
+        max_row.addWidget(self._max_db)
+        gl.addLayout(max_row)
+
+        vbox.addWidget(grp)
+        vbox.addStretch()
+        return w
 
     def _build_bottom_bar(self) -> QWidget:
         container = QWidget()
@@ -325,6 +409,77 @@ class MainWindow(QMainWindow):
 
         return container
 
+    def _build_toolbar(self):
+        tb = QToolBar("Main")
+        tb.setMovable(False)
+        tb.setStyleSheet("QToolBar { spacing: 6px; padding: 3px; }")
+        self.addToolBar(tb)
+
+        settings_btn = QPushButton("⚙  Settings")
+        settings_btn.setFixedHeight(28)
+        settings_btn.setStyleSheet("QPushButton { padding: 2px 10px; font-size: 11pt; }")
+        settings_btn.clicked.connect(self._show_settings_dialog)
+        tb.addWidget(settings_btn)
+
+        tb.addSeparator()
+
+        # ── Audio controls ────────────────────────────────────────────────────
+        tb.addWidget(_label(" 🔊"))
+
+        self._tb_vol_slider = QSlider(Qt.Horizontal)
+        self._tb_vol_slider.setRange(0, 100)
+        self._tb_vol_slider.setValue(80)
+        self._tb_vol_slider.setFixedWidth(100)
+        self._tb_vol_slider.setFixedHeight(20)
+        self._tb_vol_slider.setToolTip("Volume")
+        tb.addWidget(self._tb_vol_slider)
+
+        self._tb_vol_label = QLabel("80%")
+        self._tb_vol_label.setFixedWidth(40)
+        self._tb_vol_label.setFont(QFont('Menlo', 10))
+        tb.addWidget(self._tb_vol_label)
+
+        self._tb_mute_btn = QPushButton("Mute")
+        self._tb_mute_btn.setCheckable(True)
+        self._tb_mute_btn.setFixedHeight(28)
+        self._tb_mute_btn.setStyleSheet(
+            "QPushButton { padding: 2px 8px; font-size: 11pt; }"
+            "QPushButton:checked { background-color: #b0b8c8; color: #333; font-weight: bold; }"
+        )
+        tb.addWidget(self._tb_mute_btn)
+
+        tb.addSeparator()
+
+        # ── TX stream toggle ──────────────────────────────────────────────────
+        self._tb_tx_btn = QPushButton("● TX")
+        self._tb_tx_btn.setCheckable(True)
+        self._tb_tx_btn.setFixedHeight(28)
+        self._tb_tx_btn.setStyleSheet(
+            "QPushButton { padding: 2px 10px; font-size: 11pt; }"
+            "QPushButton:checked { background-color: #c41e3a; color: white; font-weight: bold; }"
+        )
+        tb.addWidget(self._tb_tx_btn)
+
+    def _on_toolbar_tx_toggled(self, checked: bool):
+        self._tx_stream_btn.blockSignals(True)
+        self._tx_stream_btn.setChecked(checked)
+        self._tx_stream_btn.blockSignals(False)
+        self._on_tx_stream_toggled(checked)
+
+    def _on_toolbar_vol_changed(self, val: int):
+        self._tb_vol_label.setText(f"{val}%")
+        self._audio.set_volume(val / 100.0)
+        self._vol_slider.blockSignals(True)
+        self._vol_slider.setValue(val)
+        self._vol_slider.blockSignals(False)
+        self._vol_label.setText(f"{val}%")
+
+    def _on_toolbar_mute_toggled(self, checked: bool):
+        self._audio.set_muted(checked)
+        self._mute_btn.blockSignals(True)
+        self._mute_btn.setChecked(checked)
+        self._mute_btn.blockSignals(False)
+
     def _build_menu(self):
         mb = self.menuBar()
 
@@ -349,6 +504,11 @@ class MainWindow(QMainWindow):
         about_act.triggered.connect(self._show_about)
         help_menu.addAction(about_act)
 
+        self._settings_action = QAction("Settings...", self)
+        self._settings_action.setShortcut("Ctrl+S")
+        self._settings_action.triggered.connect(self._show_settings_dialog)
+        view_menu.addAction(self._settings_action)
+
     # ── signal connections ───────────────────────────────────────────────────
 
     def _connect_signals(self):
@@ -358,9 +518,15 @@ class MainWindow(QMainWindow):
         self._sdr.decoded_data.connect(self._on_decoded_data)
         self._sdr.status_msg.connect(self._on_status)
         self._sdr.error_msg.connect(self._on_error)
+        self._sdr.tx_spectrum_ready.connect(self._on_tx_spectrum)
 
         # Audio worker errors
         self._audio.error_msg.connect(self._on_error)
+
+        # Microphone → SDR TX
+        self._mic.audio_chunk.connect(self._sdr.enqueue_tx_audio)
+        self._mic.error_msg.connect(self._on_error)
+        self._mic.status_msg.connect(self._on_status)
 
         # Display click → tune
         self._display.freq_clicked.connect(self._on_freq_clicked)
@@ -377,10 +543,24 @@ class MainWindow(QMainWindow):
         self._gain_slider.valueChanged.connect(self._on_gain_slider_changed)
         self._min_db.valueChanged.connect(self._on_db_range_changed)
         self._max_db.valueChanged.connect(self._on_db_range_changed)
+        # Audio tab sliders sync with toolbar
         self._vol_slider.valueChanged.connect(self._on_volume_changed)
+        self._mute_btn.toggled.connect(self._on_settings_mute_toggled)
         self._sql_spin.valueChanged.connect(
             lambda v: self._audio.set_squelch(float(v)))
-        self._mute_btn.toggled.connect(self._audio.set_muted)
+
+        # Toolbar audio controls (primary)
+        self._tb_vol_slider.valueChanged.connect(self._on_toolbar_vol_changed)
+        self._tb_mute_btn.toggled.connect(self._on_toolbar_mute_toggled)
+        self._tb_tx_btn.toggled.connect(self._on_toolbar_tx_toggled)
+
+        self._settings_action.triggered.connect(self._show_settings_dialog)
+
+        # TX Streaming controls
+        self._tx_stream_btn.toggled.connect(self._on_tx_stream_toggled)
+        self._tx_mode_combo.currentIndexChanged.connect(self._on_tx_mode_changed)
+        self._tx_offset_spin.valueChanged.connect(self._on_tx_offset_changed)
+        self._tx_gain_spin.valueChanged.connect(self._on_tx_gain_changed)
 
         self._send_btn.clicked.connect(self._on_send_clicked)
         self._send_file_btn.clicked.connect(self._on_send_file_clicked)
@@ -478,6 +658,16 @@ class MainWindow(QMainWindow):
     def _on_volume_changed(self, val: int):
         self._vol_label.setText(f"{val}%")
         self._audio.set_volume(val / 100.0)
+        self._tb_vol_slider.blockSignals(True)
+        self._tb_vol_slider.setValue(val)
+        self._tb_vol_slider.blockSignals(False)
+        self._tb_vol_label.setText(f"{val}%")
+
+    def _on_settings_mute_toggled(self, checked: bool):
+        self._audio.set_muted(checked)
+        self._tb_mute_btn.blockSignals(True)
+        self._tb_mute_btn.setChecked(checked)
+        self._tb_mute_btn.blockSignals(False)
 
     def _on_status(self, msg: str):
         self._sb_left.setText(msg)
@@ -509,6 +699,12 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             self._on_error(str(exc))
 
+    def _show_settings_dialog(self):
+        if self._settings_dialog is not None:
+            self._settings_dialog.show()
+            self._settings_dialog.raise_()
+            self._settings_dialog.activateWindow()
+
     def _on_decoded_data(self, data: bytes):
         try:
             text = data.decode('utf-8')
@@ -517,7 +713,52 @@ class MainWindow(QMainWindow):
         self._rx_display.appendPlainText(text)
         self._on_status(f"Received {len(data)} bytes")
 
+    def _on_tx_stream_toggled(self, checked: bool):
+        """Start or stop TX streaming from microphone."""
+        if checked:
+            self._tx_mode = TX_MODES[self._tx_mode_combo.currentIndex()]
+            self._tx_rf_offset = self._tx_offset_spin.value() * 1e3
+            self._sdr._tx_tx_gain = self._tx_gain_spin.value()
+            self._sdr.start_tx_stream(self._tx_mode, self._tx_rf_offset)
+            self._display.set_tx_active(True)
+            self._tx_stream_btn.setText("Stop TX Stream")
+        else:
+            self._sdr.stop_tx_stream()
+            self._display.set_tx_active(False)
+            self._tx_stream_btn.setText("Start TX Stream")
+        # Keep toolbar TX button in sync
+        self._tb_tx_btn.blockSignals(True)
+        self._tb_tx_btn.setChecked(checked)
+        self._tb_tx_btn.blockSignals(False)
+
+    def _on_tx_mode_changed(self, idx: int):
+        """Update TX modulation mode."""
+        if self._tx_stream_btn.isChecked():
+            self._tx_mode = TX_MODES[idx]
+            # Restart TX with new mode
+            self._sdr.stop_tx_stream()
+            self._sdr.start_tx_stream(self._tx_mode, self._tx_rf_offset)
+
+    def _on_tx_offset_changed(self, khz: float):
+        """Update TX RF offset frequency."""
+        if self._tx_stream_btn.isChecked():
+            self._tx_rf_offset = khz * 1e3
+            # Restart TX with new offset
+            self._sdr.stop_tx_stream()
+            self._sdr.start_tx_stream(self._tx_mode, self._tx_rf_offset)
+
+    def _on_tx_gain_changed(self, val: float):
+        """Update TX gain."""
+        self._sdr._tx_tx_gain = val
+
+    def _on_tx_spectrum(self, freqs: np.ndarray, power_db: np.ndarray):
+        """Forward TX spectrum to the display (red overlay on the main spectrum plot)."""
+        self._display.update_tx_fft(freqs, power_db)
+
     def _refresh_status(self):
+        # Update mic level display
+        self._mic_level_label.setText(f"{self._mic.level_db:.1f} dB")
+        
         mode_str = "SIM" if self._sdr.simulation_mode else "HW"
         self._sb_right.setText(
             f"{mode_str} | "
@@ -541,4 +782,5 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         self._sdr.stop()
         self._audio.stop()
+        self._mic.stop()
         event.accept()

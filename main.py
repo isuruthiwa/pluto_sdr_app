@@ -12,23 +12,23 @@ import pyqtgraph as pg
 from main_window import MainWindow
 
 
-def _dark_palette(app: QApplication) -> QPalette:
+def _light_palette(app: QApplication) -> QPalette:
     p = QPalette()
-    p.setColor(QPalette.Window,          QColor(22,  22,  30))
-    p.setColor(QPalette.WindowText,      QColor(220, 220, 220))
-    p.setColor(QPalette.Base,            QColor(14,  14,  20))
-    p.setColor(QPalette.AlternateBase,   QColor(35,  35,  45))
-    p.setColor(QPalette.ToolTipBase,     QColor(40,  40,  50))
-    p.setColor(QPalette.ToolTipText,     QColor(220, 220, 220))
-    p.setColor(QPalette.Text,            QColor(220, 220, 220))
-    p.setColor(QPalette.Button,          QColor(45,  45,  58))
-    p.setColor(QPalette.ButtonText,      QColor(220, 220, 220))
+    p.setColor(QPalette.Window,          QColor(240, 240, 245))
+    p.setColor(QPalette.WindowText,      QColor(30,  30,  30))
+    p.setColor(QPalette.Base,            QColor(255, 255, 255))
+    p.setColor(QPalette.AlternateBase,   QColor(230, 230, 235))
+    p.setColor(QPalette.ToolTipBase,     QColor(255, 255, 220))
+    p.setColor(QPalette.ToolTipText,     QColor(30,  30,  30))
+    p.setColor(QPalette.Text,            QColor(30,  30,  30))
+    p.setColor(QPalette.Button,          QColor(225, 225, 230))
+    p.setColor(QPalette.ButtonText,      QColor(30,  30,  30))
     p.setColor(QPalette.BrightText,      Qt.red)
-    p.setColor(QPalette.Link,            QColor(42,  130, 218))
-    p.setColor(QPalette.Highlight,       QColor(42,  130, 218))
-    p.setColor(QPalette.HighlightedText, Qt.black)
-    p.setColor(QPalette.Disabled, QPalette.Text,       QColor(100, 100, 110))
-    p.setColor(QPalette.Disabled, QPalette.ButtonText, QColor(100, 100, 110))
+    p.setColor(QPalette.Link,            QColor(0,   100, 200))
+    p.setColor(QPalette.Highlight,       QColor(0,   120, 215))
+    p.setColor(QPalette.HighlightedText, QColor(255, 255, 255))
+    p.setColor(QPalette.Disabled, QPalette.Text,       QColor(160, 160, 165))
+    p.setColor(QPalette.Disabled, QPalette.ButtonText, QColor(160, 160, 165))
     return p
 
 
@@ -40,11 +40,11 @@ def main():
     app.setApplicationName("PySDR Receiver")
     app.setOrganizationName("PySDR")
     app.setStyle("Fusion")
-    app.setPalette(_dark_palette(app))
-    app.setFont(QFont("Segoe UI", 9))
+    app.setPalette(_light_palette(app))
+    app.setFont(QFont("Arial", 11))
 
     # pyqtgraph global defaults
-    pg.setConfigOptions(antialias=False, useOpenGL=False, foreground='#ccc', background='#0d0d1a')
+    pg.setConfigOptions(antialias=False, useOpenGL=False, foreground='#333', background='#f0f2f5')
 
     window = MainWindow()
     window.show()

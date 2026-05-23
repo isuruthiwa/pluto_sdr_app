@@ -239,3 +239,190 @@ def tune_and_demodulate(
         audio = scipy.signal.resample_poly(audio, ratio.numerator, ratio.denominator)
 
     return audio.astype(np.float32)
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# TRANSMISSION PIPELINE
+# ────────────────────────────────────────────────────────────────────────────
+
+def _rational_resampler(audio: np.ndarray, src_rate: int, dst_rate: int) -> np.ndarray:
+    """Resample audio using rational resampling (scipy.signal.resample_poly)."""
+    if src_rate == dst_rate:
+        return audio
+    ratio = Fraction(dst_rate, src_rate).limit_denominator(1000)
+    return scipy.signal.resample_poly(audio, ratio.numerator, ratio.denominator)
+
+
+def resample_iq(iq: np.ndarray, src_rate: int, dst_rate: int) -> np.ndarray:
+    """Resample complex IQ samples — handles complex arrays natively via scipy."""
+    if src_rate == dst_rate:
+        return iq.astype(np.complex64)
+    ratio = Fraction(dst_rate, src_rate).limit_denominator(1000)
+    return scipy.signal.resample_poly(iq, ratio.numerator, ratio.denominator).astype(np.complex64)
+
+
+def _pre_emphasis(audio: np.ndarray, sample_rate: float, tau: float = 75e-6) -> np.ndarray:
+    """6 dB/octave pre-emphasis — boosts high audio frequencies before FM modulation."""
+    alpha = float(np.exp(-1.0 / (tau * sample_rate)))
+    return scipy.signal.lfilter([1.0, -alpha], [1.0], audio.astype(np.float32))
+
+
+class FMModulator:
+    """Phase-continuous FM modulator for streaming TX.
+
+    Maintains phase across audio chunks so there are no click artifacts
+    at chunk boundaries during microphone transmission.
+    """
+
+    def __init__(self, deviation: float = 5e3, sample_rate: float = AUDIO_RATE):
+        self.deviation = deviation
+        self.sample_rate = sample_rate
+        self._phase = 0.0
+
+    def modulate(self, audio: np.ndarray) -> np.ndarray:
+        audio = audio.astype(np.float64)
+        peak = np.max(np.abs(audio)) + 1e-12
+        phase_inc = 2.0 * np.pi * self.deviation * (audio / peak) / self.sample_rate
+        phases = np.cumsum(phase_inc) + self._phase
+        self._phase = float(phases[-1]) % (2.0 * np.pi)
+        return np.exp(1j * phases).astype(np.complex64)
+
+    def reset(self):
+        self._phase = 0.0
+
+
+def modulate_nbfm(audio: np.ndarray, sample_rate: float, 
+                   deviation: float = 5e3, dc_offset: float = 0.0) -> np.ndarray:
+    """
+    Narrow-band FM modulation.
+    
+    Args:
+        audio: Audio signal (mono, float32)
+        sample_rate: Sample rate of the SDR output (typically 1-2 Msps)
+        deviation: FM deviation in Hz (typical: 5 kHz for NBFM)
+        dc_offset: DC frequency offset for the audio within the modulated signal
+    
+    Returns:
+        Complex baseband signal (I+jQ) ready for SDR transmission.
+    """
+    audio = audio.astype(np.float64)
+    n = len(audio)
+    t = np.arange(n, dtype=np.float64) / sample_rate
+    
+    # Normalize audio
+    peak = np.max(np.abs(audio)) + 1e-12
+    audio_norm = audio / peak
+    
+    # Frequency modulation: phase = 2*pi*deviation*integral(audio)
+    phase = 2.0 * np.pi * deviation * np.cumsum(audio_norm) / sample_rate
+    
+    # Apply DC offset (shift modulated signal to desired frequency)
+    if dc_offset != 0.0:
+        phase += 2.0 * np.pi * dc_offset * t
+    
+    # Generate complex exponential
+    iq = np.exp(1j * phase).astype(np.complex64)
+    return iq
+
+
+def modulate_am(audio: np.ndarray, sample_rate: float, 
+                 dc_offset: float = 0.0) -> np.ndarray:
+    """
+    Amplitude Modulation.
+    
+    Args:
+        audio: Audio signal (mono, float32)
+        sample_rate: Sample rate of the SDR output
+        dc_offset: RF carrier frequency
+    
+    Returns:
+        Complex baseband signal (I+jQ).
+    """
+    audio = audio.astype(np.float64)
+    n = len(audio)
+    t = np.arange(n, dtype=np.float64) / sample_rate
+    
+    # Normalize and create envelope (1 + modulation)
+    peak = np.max(np.abs(audio)) + 1e-12
+    audio_norm = audio / peak
+    envelope = 1.0 + 0.8 * audio_norm  # Modulation index ~0.8
+    
+    # AM: multiply envelope by carrier
+    if dc_offset != 0.0:
+        carrier = np.exp(2j * np.pi * dc_offset * t)
+    else:
+        carrier = np.ones(n, dtype=np.complex128)
+    
+    iq = (envelope * carrier).astype(np.complex64)
+    return iq
+
+
+def modulate_wfm(audio: np.ndarray, sample_rate: float,
+                  deviation: float = 75e3, dc_offset: float = 0.0) -> np.ndarray:
+    """
+    Wide-band FM modulation (broadcast FM).
+    
+    Args:
+        audio: Audio signal (mono, float32)
+        sample_rate: Sample rate of the SDR output
+        deviation: FM deviation in Hz (typical: 75 kHz for WFM)
+        dc_offset: DC frequency offset
+    
+    Returns:
+        Complex baseband signal (I+jQ).
+    """
+    audio = audio.astype(np.float64)
+    n = len(audio)
+    t = np.arange(n, dtype=np.float64) / sample_rate
+    
+    # Normalize audio
+    peak = np.max(np.abs(audio)) + 1e-12
+    audio_norm = audio / peak
+    
+    # Frequency modulation
+    phase = 2.0 * np.pi * deviation * np.cumsum(audio_norm) / sample_rate
+    
+    if dc_offset != 0.0:
+        phase += 2.0 * np.pi * dc_offset * t
+    
+    iq = np.exp(1j * phase).astype(np.complex64)
+    return iq
+
+
+def transmit_pipeline(
+    audio: np.ndarray,
+    audio_rate: int = AUDIO_RATE,
+    sdr_rate: int = int(2e6),
+    modulation: str = 'nbfm',
+    rf_offset: float = 0.0,
+) -> np.ndarray:
+    """GNURadio-style TX pipeline: modulate at audio rate → resample IQ → RF offset.
+
+    Modulating first at the low audio rate (48 kHz) and then upsampling the
+    complex IQ to the SDR rate is both more efficient and numerically better
+    than the reverse order.
+    """
+    audio = audio.astype(np.float32)
+    mod = modulation.lower()
+
+    # Step 1: Modulate at audio rate
+    if mod == 'nbfm':
+        iq = modulate_nbfm(_pre_emphasis(audio, audio_rate), audio_rate, deviation=5e3)
+    elif mod == 'wfm':
+        iq = modulate_wfm(audio, audio_rate, deviation=75e3)
+    elif mod == 'am':
+        iq = modulate_am(audio, audio_rate)
+    else:
+        raise ValueError(f"Unknown modulation: {modulation}")
+
+    # Step 2: Rational Resampler — upsample IQ to SDR sample rate
+    iq = resample_iq(iq, audio_rate, sdr_rate)
+
+    # Step 3: Frequency-shift for RF offset (applied at full SDR rate)
+    if rf_offset != 0.0:
+        t = np.arange(len(iq), dtype=np.float64) / sdr_rate
+        iq = (iq * np.exp(2j * np.pi * rf_offset * t)).astype(np.complex64)
+
+    # Step 4: Normalise amplitude
+    peak = np.max(np.abs(iq)) + 1e-12
+    return (iq * (0.8 / peak)).astype(np.complex64)

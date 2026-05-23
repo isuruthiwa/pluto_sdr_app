@@ -8,16 +8,16 @@ WATERFALL_ROWS = 120
 
 
 def _make_colormap() -> pg.ColorMap:
-    """Inferno-like colormap for waterfall."""
+    """Viridis-like colormap suited for a light UI."""
     pos = np.linspace(0, 1, 7)
     colors = np.array([
-        [  0,   0,   0, 255],
-        [ 40,   0,  80, 255],
-        [120,   0, 120, 255],
-        [200,  30,  60, 255],
-        [255, 120,   0, 255],
-        [255, 220,   0, 255],
-        [255, 255, 255, 255],
+        [240, 240, 245, 255],   # near-white (noise floor)
+        [180, 210, 235, 255],   # light blue
+        [ 60, 160, 210, 255],   # blue
+        [ 30, 180, 120, 255],   # teal-green
+        [200, 210,  40, 255],   # yellow-green
+        [240, 140,  20, 255],   # orange
+        [200,  30,  20, 255],   # red (peak)
     ], dtype=np.uint8)
     return pg.ColorMap(pos, colors)
 
@@ -53,20 +53,20 @@ class SpectrumWaterfallWidget(QWidget):
         layout.setSpacing(0)
 
         self._glw = pg.GraphicsLayoutWidget()
-        self._glw.setBackground('#0d0d1a')
+        self._glw.setBackground('#f0f2f5')
         layout.addWidget(self._glw)
 
-        tick_font = QFont('Consolas', 7)
-        axis_pen  = pg.mkPen('#445')
+        tick_font = QFont('Menlo', 9)
+        axis_pen  = pg.mkPen('#aab')
 
         # ── Spectrum plot ────────────────────────────────────────────────────
         self._sp = self._glw.addPlot(row=0, col=0)
         self._sp.setLabel('left',   'Power', units='dBFS',
-                          **{'color': '#aaa', 'font-size': '8pt'})
+                          **{'color': '#444', 'font-size': '10pt'})
         self._sp.setLabel('bottom', 'Frequency', units='MHz',
-                          **{'color': '#aaa', 'font-size': '8pt'})
+                          **{'color': '#444', 'font-size': '10pt'})
         self._sp.setYRange(-110, -10, padding=0)
-        self._sp.showGrid(x=True, y=True, alpha=0.25)
+        self._sp.showGrid(x=True, y=True, alpha=0.3)
         self._sp.getAxis('left').setStyle(tickFont=tick_font)
         self._sp.getAxis('bottom').setStyle(tickFont=tick_font)
         self._sp.setMouseEnabled(x=False, y=True)
@@ -76,30 +76,37 @@ class SpectrumWaterfallWidget(QWidget):
 
         # FFT curve
         self._curve = self._sp.plot(
-            pen=pg.mkPen(color='#00c8ff', width=1),
+            pen=pg.mkPen(color='#0078d4', width=1),
             antialias=False,
         )
 
         # Filled area under curve
         self._fill_curve = self._sp.plot(
-            pen=pg.mkPen(color='#00c8ff', width=1),
+            pen=pg.mkPen(color='#0078d4', width=1),
             fillLevel=-120,
-            brush=(0, 180, 255, 30),
+            brush=(0, 120, 212, 35),
             antialias=False,
         )
+
+        # TX spectrum overlay
+        self._tx_curve = self._sp.plot(
+            pen=pg.mkPen(color='#d00000', width=1),
+            antialias=False,
+        )
+        self._tx_curve.setVisible(False)
 
         # Rx channel marker (vertical line)
         self._rx_line = pg.InfiniteLine(
             angle=90, movable=False,
-            pen=pg.mkPen(color='#ffcc00', width=1,
+            pen=pg.mkPen(color='#e07000', width=1,
                          style=Qt.DashLine),
-            label='RX', labelOpts={'color': '#ffcc00', 'movable': False},
+            label='RX', labelOpts={'color': '#e07000', 'movable': False},
         )
         self._sp.addItem(self._rx_line)
 
         # ── Waterfall plot ───────────────────────────────────────────────────
         self._wf = self._glw.addPlot(row=1, col=0)
-        self._wf.setLabel('left', 'Time', **{'color': '#aaa', 'font-size': '8pt'})
+        self._wf.setLabel('left', 'Time', **{'color': '#444', 'font-size': '10pt'})
         self._wf.getAxis('left').setStyle(showValues=False)
         self._wf.getAxis('bottom').setStyle(tickFont=tick_font)
         self._wf.setMouseEnabled(x=False, y=False)
@@ -115,7 +122,7 @@ class SpectrumWaterfallWidget(QWidget):
         # Rx marker on waterfall
         self._wf_rx_line = pg.InfiniteLine(
             angle=90, movable=False,
-            pen=pg.mkPen(color='#ffcc00', width=1, style=Qt.DashLine),
+            pen=pg.mkPen(color='#e07000', width=1, style=Qt.DashLine),
         )
         self._wf.addItem(self._wf_rx_line)
 
@@ -163,6 +170,17 @@ class SpectrumWaterfallWidget(QWidget):
         rx_mhz = (self.center_freq + offset_hz) / 1e6
         self._rx_line.setPos(rx_mhz)
         self._wf_rx_line.setPos(rx_mhz)
+
+    def update_tx_fft(self, freqs: np.ndarray, power_db: np.ndarray):
+        """Overlay the TX spectrum on the same plot (red curve)."""
+        abs_mhz = (freqs + self.center_freq) / 1e6
+        self._tx_curve.setData(x=abs_mhz, y=power_db)
+
+    def set_tx_active(self, active: bool):
+        """Show or hide the TX spectrum overlay."""
+        self._tx_curve.setVisible(active)
+        if not active:
+            self._tx_curve.setData(x=[], y=[])
 
     def set_power_range(self, min_db: float, max_db: float):
         self._sp.setYRange(min_db, max_db, padding=0)
